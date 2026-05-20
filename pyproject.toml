@@ -1,0 +1,62 @@
+[project]
+name = "tactical-gateway"
+version = "0.1.0"
+description = "Tactical data gateway: capture, normalize, translate, and RAG-search for edge/IL6 environments"
+requires-python = ">=3.11"
+
+# This is the workspace root. Real dependencies are declared in each
+# service/lib pyproject. Top-level pyproject exists for tool config
+# (ruff, mypy, pytest) that applies across the repo.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["deploy/migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "S",    # bandit security
+    "C4",   # comprehensions
+    "PIE",  # misc
+    "PT",   # pytest style
+    "RET",  # return statements
+    "SIM",  # simplify
+    "ARG",  # unused arguments
+]
+ignore = [
+    "E501",  # line length (handled by formatter)
+    "S101",  # use of assert (fine in tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S", "ARG"]
+"deploy/migrations/**" = ["N", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+exclude = ["deploy/migrations/versions"]
+
+[[tool.mypy.overrides]]
+module = ["geoalchemy2.*", "pgvector.*", "minio.*", "nats.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["libs", "services", "tests"]
+addopts = "-ra --strict-markers --tb=short"
+asyncio_mode = "auto"
+markers = [
+    "integration: requires docker-compose stack running",
+    "slow: long-running tests, deselect with '-m \"not slow\"'",
+]

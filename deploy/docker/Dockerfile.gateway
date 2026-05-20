@@ -1,0 +1,77 @@
+# Multi-stage build for the gateway service.
+# Stage 1: build dependencies in a fat image.
+# Stage 2: copy into a slim runtime image.
+#
+# For IL6 work, pin to specific image digests (sha256) rather than tags,
+# and source images from your approved registry mirror.
+
+FROM python:3.11-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    POETRY_VIRTUALENVS_CREATE=false
+
+WORKDIR /build
+
+# System deps for psycopg, geo libraries, and building wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        libproj-dev \
+        libgeos-dev \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy source for editable install of local libs.
+COPY libs/ /build/libs/
+COPY services/gateway/ /build/services/gateway/
+
+# Install local packages into a virtualenv we can copy out.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --upgrade pip
+RUN pip install \
+        "fastapi>=0.110" \
+        "uvicorn[standard]>=0.27" \
+        "pydantic>=2.6" \
+        "psycopg[binary]>=3.1" \
+        "sqlalchemy>=2.0" \
+        "alembic>=1.13" \
+        "geoalchemy2>=0.14" \
+        "pgvector>=0.2.5" \
+        "minio>=7.2" \
+        "nats-py>=2.6" \
+        "structlog>=24.1"
+
+RUN pip install -e /build/libs/cto_schema
+
+# -----------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 \
+        libproj25 \
+        libgeos-c1v5 \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r gateway && useradd -r -g gateway gateway
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /build/libs /app/libs
+COPY services/gateway/ /app/services/gateway/
+
+USER gateway
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "services.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
