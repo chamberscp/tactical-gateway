@@ -46,6 +46,18 @@ tables for audit.
 - HNSW index rebuilds on large insert batches are slow; we'll need
   batching strategies in the RAG ingest pipeline.
 
+## Update 2026-05-20 — Image selection
+
+Initial implementation used the `pgvector/pgvector:pg16` image on the
+assumption that it included PostGIS. It does not. To get both extensions
+we now build a custom image (`deploy/docker/Dockerfile.postgres`) based
+on the official `postgis/postgis:16-3.4` and install `postgresql-16-pgvector`
+from the Debian apt repository (the same source the pgvector/pgvector
+image draws from). This gives us PostGIS 3.4.x and pgvector 0.8.x in a
+single Postgres 16 image. Trade-off: a one-time local build versus a
+pre-built pull. Worth it; the dependency story is clearer this way
+because we control exactly what's installed.
+
 ## Revisit if
 
 - Vector count exceeds 10M, or query latency exceeds 200ms p95 at scale.
