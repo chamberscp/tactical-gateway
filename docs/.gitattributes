@@ -1,0 +1,25 @@
+﻿# Default: normalize to LF on commit, restore native on checkout
+* text=auto
+
+# Files that must always be LF (run inside Linux containers)
+*.sh         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+Dockerfile*  text eol=lf
+Makefile     text eol=lf
+*.py         text eol=lf
+*.sql        text eol=lf
+
+# Files that must always be CRLF (PowerShell scripts on Windows)
+*.ps1        text eol=crlf
+*.psm1       text eol=crlf
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+
+# Binary files — never convert
+*.png        binary
+*.jpg        binary
+*.pdf        binary
+*.docx       binary
+*.zip        binary
+*.svg        binary
