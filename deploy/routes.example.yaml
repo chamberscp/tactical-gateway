@@ -1,0 +1,44 @@
+# Sample routes configuration for development.
+#
+# Mount or copy this file to /etc/gateway/routes.yaml inside the gateway
+# container (or set ROUTES_CONFIG_PATH env var to a different location).
+#
+# Each route names a match condition and a destination. Unset match
+# fields are wildcards. Destinations are TCP or UDP, with a target
+# output format. The tcp_listener tool can be used as a destination
+# for quick testing.
+
+routes:
+  # Forward every CoT XML message to a local TCP listener for debugging.
+  - id: xml-to-debug-listener
+    enabled: true
+    match:
+      source_protocol: cot_xml
+    destination:
+      kind: tcp
+      host: host.docker.internal
+      port: 9999
+      format: cot_xml
+
+  # Forward every CoT protobuf message to a different listener for debugging.
+  - id: pb-to-debug-listener
+    enabled: true
+    match:
+      source_protocol: cot_protobuf
+    destination:
+      kind: tcp
+      host: host.docker.internal
+      port: 9998
+      format: cot_protobuf
+
+  # Example: bridge protocols - convert protobuf input to XML output for a
+  # consumer that only speaks XML.
+  - id: pb-to-xml-bridge
+    enabled: false       # disabled by default; enable to demonstrate
+    match:
+      source_protocol: cot_protobuf
+    destination:
+      kind: tcp
+      host: host.docker.internal
+      port: 9997
+      format: cot_xml

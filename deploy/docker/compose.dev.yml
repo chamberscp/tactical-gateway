@@ -1,4 +1,4 @@
-﻿name: tactical-gateway-dev
+name: tactical-gateway-dev
 
 services:
   postgres:
@@ -86,8 +86,15 @@ services:
       MINIO_BUCKET_RAW: raw-captures
       NATS_URL: nats://nats:4222
       LOG_LEVEL: INFO
+      LOG_JSON: "true"
+      COT_XML_TCP_PORT: "8087"
+      COT_PB_TCP_PORT: "8089"
+      COT_XML_UDP_PORT: "0"
+      ROUTES_CONFIG_PATH: /etc/gateway/routes.yaml
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8000:8000"   # HTTP API
+      - "127.0.0.1:8087:8087"   # CoT XML TCP
+      - "127.0.0.1:8089:8089"   # CoT PB TCP
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s

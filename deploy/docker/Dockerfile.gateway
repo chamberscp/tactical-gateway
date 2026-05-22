@@ -1,40 +1,42 @@
-# Multi-stage build for the gateway service.
-# Stage 1: build dependencies in a fat image.
-# Stage 2: copy into a slim runtime image.
-#
-# For IL6 work, pin to specific image digests (sha256) rather than tags,
-# and source images from your approved registry mirror.
+# Gateway service image, Phase 1.
+# Includes the protoc compiler to build CoT protobuf bindings at image
+# build time.
 
 FROM python:3.11-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /build
 
-# System deps for psycopg, geo libraries, and building wheels.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
         libproj-dev \
         libgeos-dev \
+        protobuf-compiler \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy source for editable install of local libs.
 COPY libs/ /build/libs/
-COPY services/gateway/ /build/services/gateway/
+COPY services/ /build/services/
+COPY tools/ /build/tools/
 
-# Install local packages into a virtualenv we can copy out.
+# Generate protobuf bindings.
+RUN cd /build/services/gateway/normalizers && \
+    protoc --python_out=. cotevent.proto && \
+    test -f cotevent_pb2.py
+
+# Build a venv with everything pre-installed.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-RUN pip install --upgrade pip
-RUN pip install \
+RUN pip install --upgrade pip && \
+    pip install \
         "fastapi>=0.110" \
         "uvicorn[standard]>=0.27" \
         "pydantic>=2.6" \
+        "pydantic-settings>=2.2" \
         "psycopg[binary]>=3.1" \
         "sqlalchemy>=2.0" \
         "alembic>=1.13" \
@@ -42,15 +44,19 @@ RUN pip install \
         "pgvector>=0.2.5" \
         "minio>=7.2" \
         "nats-py>=2.6" \
-        "structlog>=24.1"
+        "structlog>=24.1" \
+        "protobuf>=4.25" \
+        "pyyaml>=6.0"
 
-RUN pip install -e /build/libs/cto_schema
+RUN pip install /build/libs/cto_schema && \
+    pip install /build/libs/common
 
 # -----------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
     PATH="/opt/venv/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -65,11 +71,15 @@ WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /build/libs /app/libs
-COPY services/gateway/ /app/services/gateway/
+COPY --from=builder /build/services /app/services
+COPY --from=builder /build/tools /app/tools
+
+# Provide a default routes config; mount your own at /etc/gateway/routes.yaml.
+RUN mkdir -p /etc/gateway
+COPY deploy/routes.example.yaml /etc/gateway/routes.yaml
 
 USER gateway
-
-EXPOSE 8000
+EXPOSE 8000 8087 8089
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://localhost:8000/health || exit 1

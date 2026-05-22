@@ -1,0 +1,87 @@
+// CoT event in TAK protocol protobuf form.
+//
+// Source: TAK Server's public protocol distribution. Reproduced here so
+// the gateway can be built without fetching at build time. If a future
+// TAK release changes the wire format, regenerate from the new .proto.
+//
+// Wire framing for TAK protocol over TCP:
+//   1 byte:   magic byte 0xbf
+//   varint:   message length in bytes
+//   1 byte:   magic byte 0xbf
+//   N bytes:  protobuf-encoded TakMessage (this file's message)
+
+syntax = "proto3";
+
+package atakmap.commoncommo.protobuf.v1;
+
+option java_package = "com.atakmap.commoncommo.protobuf.v1";
+
+message CotEvent {
+  string type = 1;
+  string access = 2;
+  string qos = 3;
+  string opex = 4;
+  string uid = 5;
+  uint64 sendTime = 6;        // millis since epoch
+  uint64 startTime = 7;
+  uint64 staleTime = 8;
+  string how = 9;
+  double lat = 10;
+  double lon = 11;
+  double hae = 12;            // height above ellipsoid (m)
+  double ce = 13;             // circular error (m)
+  double le = 14;             // linear error (m)
+  Detail detail = 15;
+}
+
+message Detail {
+  string xmlDetail = 1;       // catch-all: full XML of <detail> subtree
+  Contact contact = 2;
+  Group group = 3;
+  PrecisionLocation precisionLocation = 4;
+  Status status = 5;
+  Takv takv = 6;
+  Track track = 7;
+}
+
+message Contact {
+  string endpoint = 1;
+  string callsign = 2;
+}
+
+message Group {
+  string name = 1;
+  string role = 2;
+}
+
+message PrecisionLocation {
+  string geopointsrc = 1;
+  string altsrc = 2;
+}
+
+message Status {
+  string battery = 1;
+}
+
+message Takv {
+  string device = 1;
+  string platform = 2;
+  string os = 3;
+  string version = 4;
+}
+
+message Track {
+  double speed = 1;
+  double course = 2;
+}
+
+message TakMessage {
+  TakControl takControl = 1;
+  CotEvent cotEvent = 2;
+}
+
+message TakControl {
+  uint32 minProtoVersion = 1;
+  uint32 maxProtoVersion = 2;
+  string contactUid = 3;
+}

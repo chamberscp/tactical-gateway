@@ -54,3 +54,7 @@ local-storage/
 
 # Docker
 *.tar
+
+# Generated protobuf bindings
+**/*_pb2.py
+**/*_pb2.pyi
