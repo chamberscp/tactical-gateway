@@ -91,17 +91,49 @@ services:
       COT_PB_TCP_PORT: "8089"
       COT_XML_UDP_PORT: "0"
       ROUTES_CONFIG_PATH: /etc/gateway/routes.yaml
+      KMZ_INBOX_PATH: /var/lib/tactical-gateway/inbox/kmz
+      KMZ_INBOX_POLL_INTERVAL_S: "2.0"
     ports:
       - "127.0.0.1:8000:8000"   # HTTP API
       - "127.0.0.1:8087:8087"   # CoT XML TCP
       - "127.0.0.1:8089:8089"   # CoT PB TCP
+    volumes:
+      - kmz_inbox:/var/lib/tactical-gateway/inbox/kmz
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  opstore:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.opstore
+    container_name: tg-opstore
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      NATS_URL: nats://nats:4222
+      OPSTORE_SUBJECT: cto.normalized.>
+      LOG_LEVEL: INFO
+      LOG_JSON: "true"
+
 volumes:
   postgres-data:
   minio-data:
   nats-data:
+  kmz_inbox:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: D:/tactical-gateway/dev/inbox/kmz

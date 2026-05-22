@@ -7,19 +7,7 @@ Wires together:
 - NATS publisher (for downstream consumers)
 - Route engine (forwards CTOs to configured destinations)
 - HTTP API (health, ready, routes inventory and toggle)
-
-Lifecycle:
-    startup ->
-      configure logging
-      create MinIO, NATS, capture writer
-      ensure raw-captures bucket
-      load routes.yaml
-      start route engine
-      start listeners (each binds its port)
-    shutdown (reverse):
-      stop listeners
-      close route engine senders
-      close NATS
+- Phase 2a: KMZ ingest (folder watch + HTTP upload), Query API
 """
 
 from __future__ import annotations
@@ -28,6 +16,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import AsyncIterator
 
 from cto_schema import CTO
@@ -40,7 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from common import configure_logging, get_logger, get_settings
 
+from .api_phase2a import build_routes as build_phase2a_routes
 from .capture import CaptureWriter
+from .kmz_ingest import KmzIngestor
+from .kmz_watcher import KmzFolderWatcher
 from .listeners import (
     CoTPbTcpListener,
     CoTXmlTcpListener,
@@ -67,6 +59,10 @@ class AppState:
     route_engine: RouteEngine | None = None
     listeners: list = []
     listener_stats: dict[str, ListenerStats] = {}
+    # Phase 2a
+    kmz_ingestor: "KmzIngestor | None" = None
+    kmz_watcher: "KmzFolderWatcher | None" = None
+    db_dsn: str = ""
 
 
 state = AppState()
@@ -107,15 +103,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # The sink: each CTO goes both to NATS and through the route engine.
     async def sink(cto: CTO) -> None:
-        # Publish to NATS for downstream consumers (operational store
-        # writer, observability, etc.). For Phase 1 we have no NATS
-        # subscribers yet but we publish anyway so subscribers can be
-        # added without changing the gateway.
         try:
             await state.publisher.publish_cto(cto)
         except Exception as e:
             log.warning("nats publish failed", error=str(e))
-        # Forward through the route engine.
         await state.route_engine.handle_cto(cto)
 
     # Listeners
@@ -156,11 +147,46 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         state.listeners.append(listener)
         state.listener_stats[f"cot_pb_tcp:{settings.cot_pb_tcp_port}"] = listener.stats
 
+    # ---- Phase 2a additions ----
+
+    # KMZ ingestor
+    state.kmz_ingestor = KmzIngestor(
+        capture_writer=state.capture,
+        publisher=state.publisher,
+    )
+
+    # Optional folder watcher
+    inbox_path = getattr(settings, "kmz_inbox_path", "") or ""
+    if inbox_path:
+        state.kmz_watcher = KmzFolderWatcher(
+            inbox_path=Path(inbox_path),
+            ingestor=state.kmz_ingestor,
+            poll_interval_s=getattr(settings, "kmz_inbox_poll_interval_s", 2.0),
+        )
+        await state.kmz_watcher.start()
+
+    # Mount Phase 2a routes (POST /ingest/kmz, GET /cto/...)
+    db_dsn = settings.postgres_url
+    db_dsn = db_dsn.replace("postgresql+psycopg://", "postgresql://")
+    db_dsn = db_dsn.replace("postgresql+asyncpg://", "postgresql://")
+    state.db_dsn = db_dsn
+    phase2a_router = build_phase2a_routes(
+        kmz_ingestor=state.kmz_ingestor,
+        db_dsn=state.db_dsn,
+    )
+    _app.include_router(phase2a_router)
+
     log.info("gateway started")
     try:
         yield
     finally:
         log.info("shutting down")
+        # Phase 2a shutdown
+        if state.kmz_watcher is not None:
+            try:
+                await state.kmz_watcher.stop()
+            except Exception:
+                pass
         for listener in state.listeners:
             try:
                 await listener.stop()
@@ -177,19 +203,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="Tactical Gateway",
-    version="0.2.0",
-    description="Phase 1: CoT capture, normalize, translate, forward.",
+    version="0.3.0",
+    description="Phase 2a: CoT capture/normalize/route + KMZ ingest + query API.",
     lifespan=lifespan,
 )
 
 
 # ---------------------------------------------------------------------------
-# HTTP endpoints
+# HTTP endpoints (Phase 1)
 # ---------------------------------------------------------------------------
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "tactical-gateway", "version": "0.2.0", "phase": "1"}
+    return {"service": "tactical-gateway", "version": "0.3.0", "phase": "2a"}
 
 
 @app.get("/health")

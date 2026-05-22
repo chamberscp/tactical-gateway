@@ -58,3 +58,8 @@ local-storage/
 # Generated protobuf bindings
 **/*_pb2.py
 **/*_pb2.pyi
+
+# Phase 2a runtime state - KMZ inbox files
+dev/inbox/kmz/*.kmz
+dev/inbox/kmz/.processed/
+dev/inbox/kmz/.failed/

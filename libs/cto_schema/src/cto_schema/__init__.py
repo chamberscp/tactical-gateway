@@ -15,6 +15,7 @@ from cto_schema.models import (
     BattleDimension,
     Classification,
     Geometry,
+    IngestSource,
     Kinematics,
     ObjectClass,
     ProvenanceEntry,
@@ -33,6 +34,7 @@ __all__ = [
     "BattleDimension",
     "Classification",
     "Geometry",
+    "IngestSource",
     "Kinematics",
     "ObjectClass",
     "ProvenanceEntry",
@@ -50,4 +52,4 @@ __all__ = [
     "uuid7_timestamp_ms",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

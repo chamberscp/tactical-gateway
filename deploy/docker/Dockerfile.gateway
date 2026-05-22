@@ -46,7 +46,8 @@ RUN pip install --upgrade pip && \
         "nats-py>=2.6" \
         "structlog>=24.1" \
         "protobuf>=4.25" \
-        "pyyaml>=6.0"
+        "pyyaml>=6.0" \
+        "python-multipart>=0.0.9"
 
 RUN pip install /build/libs/cto_schema && \
     pip install /build/libs/common

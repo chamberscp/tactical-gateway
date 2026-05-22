@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tg-opstore"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "nats-py>=2.6",
+    "pydantic>=2.5",
+    "sqlalchemy>=2.0",
+    "geoalchemy2>=0.14",
+    "psycopg[binary]>=3.1",
+    "structlog>=24.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["opstore*"]

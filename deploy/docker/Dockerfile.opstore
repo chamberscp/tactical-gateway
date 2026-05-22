@@ -1,0 +1,50 @@
+# tg-opstore service: NATS subscriber writing CTOs to PostGIS
+#
+# Multi-stage build matching the gateway pattern. Builds and installs the
+# common and cto_schema libs, plus the opstore service itself.
+
+FROM python:3.11-slim AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy and build the libraries
+COPY libs/common /build/libs/common
+COPY libs/cto_schema /build/libs/cto_schema
+COPY services/opstore /build/services/opstore
+
+RUN pip install /build/libs/common /build/libs/cto_schema /build/services/opstore
+
+# ----------------------------------------------------------------------------
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Bring the installed packages from the builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Also copy source so `python -m services.opstore.main` works
+COPY services/opstore /app/services/opstore
+
+RUN mkdir -p /app/services && touch /app/services/__init__.py
+
+USER nobody
+
+CMD ["python", "-m", "services.opstore.main"]

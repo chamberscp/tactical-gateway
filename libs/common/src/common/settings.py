@@ -56,6 +56,17 @@ class Settings(BaseSettings):
 
     # --- Routes config ------------------------------------------------
     routes_config_path: str = "/etc/gateway/routes.yaml"
+    
+    # --- KMZ ingest (Phase 2a) ----------------------------------------
+    # Folder watcher inbox path. Empty/None disables the watcher;
+    # POST /ingest/kmz still works.
+    kmz_inbox_path: str = ""
+    kmz_inbox_poll_interval_s: float = 2.0
+    kmz_max_upload_bytes: int = 50 * 1024 * 1024  # 50 MiB
+
+    # --- Opstore (Phase 2a) -------------------------------------------
+    # NATS subject the opstore subscribes to
+    opstore_subject: str = "cto.normalized.>"
 
 
 @lru_cache(maxsize=1)
