@@ -32,7 +32,8 @@ from common import configure_logging, get_logger, get_settings
 from .api_phase2a import build_routes as build_phase2a_routes
 from .capture import CaptureWriter
 from .kmz_ingest import KmzIngestor
-from .kmz_watcher import KmzFolderWatcher
+from .folder_watcher import FolderWatcher
+from .ovl_ingest import OvlIngestor
 from .listeners import (
     CoTPbTcpListener,
     CoTXmlTcpListener,
@@ -61,7 +62,7 @@ class AppState:
     listener_stats: dict[str, ListenerStats] = {}
     # Phase 2a
     kmz_ingestor: "KmzIngestor | None" = None
-    kmz_watcher: "KmzFolderWatcher | None" = None
+    folder_watcher: "FolderWatcher | None" = None
     db_dsn: str = ""
 
 
@@ -158,12 +159,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # Optional folder watcher
     inbox_path = getattr(settings, "kmz_inbox_path", "") or ""
     if inbox_path:
-        state.kmz_watcher = KmzFolderWatcher(
+        state.ovl_ingestor = OvlIngestor(
+            capture_writer=state.capture,
+            publisher=state.publisher,
+        )
+        state.folder_watcher = FolderWatcher(
             inbox_path=Path(inbox_path),
-            ingestor=state.kmz_ingestor,
             poll_interval_s=getattr(settings, "kmz_inbox_poll_interval_s", 2.0),
         )
-        await state.kmz_watcher.start()
+        state.folder_watcher.register(".kmz", state.kmz_ingestor)
+        state.folder_watcher.register(".ovl", state.ovl_ingestor)
+        await state.folder_watcher.start()
 
     # Mount Phase 2a routes (POST /ingest/kmz, GET /cto/...)
     db_dsn = settings.postgres_url
@@ -182,9 +188,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     finally:
         log.info("shutting down")
         # Phase 2a shutdown
-        if state.kmz_watcher is not None:
+        if state.folder_watcher is not None:
             try:
-                await state.kmz_watcher.stop()
+                await state.folder_watcher.stop()
             except Exception:
                 pass
         for listener in state.listeners:

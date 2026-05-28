@@ -55,7 +55,7 @@ class KmzIngestor:
     async def ingest(
         self,
         *,
-        kmz_bytes: bytes,
+        data: bytes,
         filename: str,
         ingest_source: IngestSource,
         source_label: str,
@@ -65,19 +65,19 @@ class KmzIngestor:
         received_at = datetime.now(timezone.utc)
 
         # Quick sanity check (KMZ is a zip, all zips start with PK)
-        if len(kmz_bytes) < 4 or kmz_bytes[:2] != b"PK":
+        if len(data) < 4 or data[:2] != b"PK":
             return KmzIngestResult(
                 ok=False, filename=filename, sha256=None, object_key=None,
                 features_extracted=0,
                 error="not a zip file (KMZ must begin with PK signature)",
             )
 
-        sha256 = hashlib.sha256(kmz_bytes).hexdigest()
+        sha256 = hashlib.sha256(data).hexdigest()
 
         # Capture - uses the real Phase 1 interface
         try:
             raw_pointer, chain_entry = await self.capture_writer.capture(
-                raw_bytes=kmz_bytes,
+                raw_bytes=data,
                 protocol="kmz",
                 captured_at=received_at,
             )
@@ -91,7 +91,7 @@ class KmzIngestor:
         # Parse
         try:
             ctos = kmz_to_ctos(
-                kmz_bytes=kmz_bytes,
+                kmz_bytes=data,
                 filename=filename,
                 source_system=source_label,
                 received_at=received_at,

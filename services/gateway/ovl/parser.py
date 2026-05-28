@@ -26,7 +26,7 @@ try:  # pragma: no cover - exercised in the integrated repo
 except Exception:  # pragma: no cover
     _HAVE_CTO = False
 
-from sidc import (
+from .sidc import (
     classify_affiliation,
     classify_geometry,
     function_code,
@@ -234,12 +234,107 @@ def ovl_to_cto_dicts(model: OvlModel, parent_ovl_uri: str = "") -> List[dict]:
     return [milbobject_to_cto_dict(o, parent_ovl_uri) for o in model.objects]
 
 
-if _HAVE_CTO:  # pragma: no cover - integrated path
-    def milbobject_to_cto(obj: MilbObject, parent_ovl_uri: str = "") -> "CTO":
-        d = milbobject_to_cto_dict(obj, parent_ovl_uri)
-        return CTO(
-            object_class=d["object_class"],
-            name=d["name"],
+class OvlParseError(Exception):
+    """Raised when an OVL document cannot be parsed (parallels KmzParseError)."""
+
+
+# Map our SIDC-derived affiliation to the cto_schema.Affiliation enum. Our sidc
+# module collapses to four buckets; cto_schema has a richer set, so we map to
+# the matching members. (S=suspect, A=assumed-friend, P=pending are reachable
+# from the 2525 identity set but our classify_affiliation buckets them; the
+# string values still line up where they exist.)
+def _to_cto_affiliation(affil_value: str):
+    """Map sidc.Affiliation value (str) -> cto_schema.Affiliation, or None."""
+    if not _HAVE_CTO:
+        return affil_value
+    from cto_schema import Affiliation as CtoAffil  # local import; integrated path
+    return {
+        "friend": CtoAffil.FRIEND,
+        "hostile": CtoAffil.HOSTILE,
+        "neutral": CtoAffil.NEUTRAL,
+        "unknown": CtoAffil.UNKNOWN,
+    }.get(affil_value, CtoAffil.UNKNOWN)
+
+
+# --------------------------------------------------------------------------
+# Integrated entry point: ovl_to_ctos
+#
+# Signature and CTO construction parallel kmz_parser.kmz_to_ctos exactly so OVL
+# CTOs are indistinguishable from KMZ CTOs in the store except for
+# source_protocol=OVL and the OVL-specific attributes. Verified against the real
+# cto_schema.models (CTO is extra="forbid", so only declared fields are set).
+# --------------------------------------------------------------------------
+
+def ovl_to_ctos(
+    *,
+    ovl_bytes: bytes,
+    filename: str,
+    source_system: str,
+    received_at,
+    raw_pointer=None,
+    ingest_source=None,
+):
+    """Parse OVL bytes and return a list of graphic CTOs (mirrors kmz_to_ctos)."""
+    try:
+        model = parse_ovl_bytes(ovl_bytes)
+    except Exception as e:  # XML errors, bad POSITION, missing MODEL, etc.
+        raise OvlParseError(str(e)) from e
+
+    if not _HAVE_CTO:
+        # Unit-test path: return enriched dicts (used by test_ovl_ingest.py).
+        parent_uri = getattr(raw_pointer, "object_key", "") or ""
+        out = []
+        for idx, obj in enumerate(model.objects):
+            d = milbobject_to_cto_dict(obj, parent_ovl_uri=parent_uri)
+            d["attributes"]["overlay_name"] = model.name
+            d["attributes"]["source_filename"] = filename
+            d["attributes"]["ovl_object_index"] = idx
+            d["source_system"] = source_system
+            out.append(d)
+        return out
+
+    # Integrated path: build real CTO objects.
+    from cto_schema import (  # local import keeps the module importable bare
+        CTO, Geometry, ObjectClass, ProvenanceEntry, SourceProtocol, Symbology,
+        uuid7,
+    )
+
+    parent_uri = getattr(raw_pointer, "object_key", "") or ""
+    ctos = []
+    for idx, obj in enumerate(model.objects):
+        d = milbobject_to_cto_dict(obj, parent_ovl_uri=parent_uri)
+        attrs = d["attributes"]
+        attrs["overlay_name"] = model.name
+        attrs["source_filename"] = filename
+        attrs["ovl_object_index"] = idx
+
+        # Pull the structured bits out of the dict into typed CTO fields.
+        sidc = attrs["sidc"]
+        affiliation = _to_cto_affiliation(attrs["affiliation"])
+
+        ctos.append(CTO(
+            uid=uuid7(),
+            source_uid=obj.name or None,        # OVL has no stable id; use NAME
+            source_system=source_system,
+            source_protocol=SourceProtocol.OVL,
+            ingest_source=ingest_source,
+            received_at=received_at,
+            event_time=received_at,             # OVL has no per-object time
+            object_class=ObjectClass.GRAPHIC,
             geometry=Geometry(**d["geometry"]),
-            attributes=d["attributes"],
-        )
+            symbology=Symbology(
+                sidc_2525c=sidc or None,
+                affiliation=affiliation,
+            ),
+            label=obj.name or None,
+            attributes=attrs,
+            raw_pointer=raw_pointer,
+            provenance=[ProvenanceEntry(
+                step="ovl_to_cto",
+                actor="gateway.ovl_parser",
+                at=received_at,
+                notes=None,
+                lossy_fields=[],
+            )],
+        ))
+    return ctos

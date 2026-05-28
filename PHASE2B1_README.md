@@ -6,46 +6,49 @@ existing folder watcher and adding an optional `/ingest/ovl` route.
 
 Scope and decisions: `docs/phase2b1-scope.md`. Rationale: `docs/adr/0011-ovl-symbology.md`.
 
-## New files
+## New / changed files
 
 ```
+services/gateway/
+  folder_watcher.py               GENERALIZED watcher (Option A) — replaces
+                                  kmz_watcher.py; dispatches by extension,
+                                  .kmz behavior identical, .ovl added
+  ovl_ingest.py                   OvlIngestor — mirrors KmzIngestor contract
+                                  (same deps, same capture/publish interfaces)
+  ovl/
+    __init__.py
+    model.py                      Pydantic model of <MODEL>/<milbobject>
+    parser.py                     OVL XML -> CTOs (D1/D2/D3) + ovl_to_ctos()
+                                  entry point matching kmz_to_ctos signature
 libs/sidc/
   __init__.py
-  sidc.py                         SIDC decode: affiliation (char-2),
-                                  geometry class (function code), coverage
-services/gateway/ovl/
-  __init__.py
-  model.py                        Pydantic model of <MODEL>/<milbobject>
-  parser.py                       OVL XML -> OvlModel -> graphic CTOs (D1/D2/D3)
-  ingest.py                       capture -> parse -> publish on NATS
-  watcher_ext.py                  registers .ovl on the Phase 2a watcher
+  sidc.py                         SIDC decode: affiliation, geometry, coverage
 docs/
   phase2b1-scope.md               (already committed)
   adr/0011-ovl-symbology.md       this phase's ADR
 tests/
-  fixtures/6_2-115-10_1-10_20.ovl real planner overlay (22 objects)
-  fixtures/6_2-115-10_42-10_57.ovl real planner overlay (21 objects)
+  fixtures/6_2-115-10_1-10_20.ovl real overlay (22 objects)
+  fixtures/6_2-115-10_42-10_57.ovl real overlay (21 objects)
   integration/test_ovl_ingest.py  13 tests, all passing
+MAIN_PY_MIGRATION.md              exact main.py + kmz_ingest.py edits
 ```
 
-## Wiring into the running gateway
+## Wiring (Option A — see MAIN_PY_MIGRATION.md for exact diffs)
 
-1. **Folder watcher.** Where the Phase 2a watcher is constructed (in the
-   gateway startup), add:
+The Phase 2a watcher (`KmzFolderWatcher`) is replaced by a generalized
+`FolderWatcher` that dispatches by extension. Five small edits to `main.py`
+plus a one-line parameter rename in `kmz_ingest.py` (`kmz_bytes` -> `data`).
+The `.kmz` path behaves identically; `.ovl` is registered alongside it:
 
-   ```python
-   from ovl.watcher_ext import register as register_ovl
-   register_ovl(watcher, capture=capture, bus=bus, audit=audit)
-   ```
+```python
+state.folder_watcher = FolderWatcher(inbox_path=Path(inbox_path), ...)
+state.folder_watcher.register(".kmz", state.kmz_ingestor)
+state.folder_watcher.register(".ovl", state.ovl_ingestor)
+await state.folder_watcher.start()
+```
 
-   Dropping a `.ovl` into the inbox now behaves like a `.kmz`.
-
-2. **(Optional) HTTP upload.** Add `POST /ingest/ovl` mirroring the Phase 2a
-   `POST /ingest/kmz` handler (same 409-on-duplicate + `?force=true`), calling
-   `ovl.ingest.ingest_ovl_bytes`. Only the parser dispatch differs by extension.
-
-3. **NATS.** CTOs publish on `cto.normalized.ovl`. The Phase 2a opstore already
-   subscribes to `cto.normalized.*`, so no opstore change is required.
+CTOs publish via the existing `publisher.publish_cto(cto)`; the Phase 2a
+opstore subscribes unchanged.
 
 ## Smoke test (dev stack)
 

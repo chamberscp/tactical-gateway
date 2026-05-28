@@ -14,7 +14,7 @@ except ImportError:
 HERE = os.path.dirname(__file__)
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "services", "gateway"))
-sys.path.insert(0, os.path.join(REPO, "libs", "sidc"))
+
 
 from ovl.parser import (  # noqa: E402
     parse_ovl_file,
@@ -170,3 +170,48 @@ def test_coordinate_order_lon_lat():
     lon, lat = pt
     assert 43 < lon < 45     # longitude ~43.97
     assert 32 < lat < 33     # latitude ~32.58
+
+
+# --------------------------------------------------------------------------
+# Integrated path: real CTO construction (runs only where cto_schema installed)
+# --------------------------------------------------------------------------
+
+def _have_cto_schema():
+    try:
+        import cto_schema  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def test_real_cto_construction():
+    """When cto_schema is available (the integrated repo), ovl_to_ctos must
+    build valid CTO objects: GRAPHIC class, OVL protocol, SIDC + affiliation in
+    Symbology, label from NAME, modifiers preserved in attributes, geometry
+    valid against the cto_schema validator."""
+    if not _have_cto_schema():
+        print("SKIP test_real_cto_construction (cto_schema not installed)")
+        return
+    from datetime import datetime, timezone
+    from ovl.parser import ovl_to_ctos
+    from cto_schema import ObjectClass, SourceProtocol, IngestSource
+
+    data = open(FILE1, "rb").read()
+    ctos = ovl_to_ctos(
+        ovl_bytes=data,
+        filename="6_2-115-10_1-10_20.ovl",
+        source_system="ovl-folder:/inbox",
+        received_at=datetime.now(timezone.utc),
+        raw_pointer=None,
+        ingest_source=IngestSource.FOLDER,
+    )
+    assert len(ctos) == 22
+    c = ctos[0]
+    assert c.object_class == ObjectClass.GRAPHIC
+    assert c.source_protocol == SourceProtocol.OVL
+    assert c.label == "10.15"               # first object's NAME in file1
+    assert c.symbology.sidc_2525c == c.attributes["sidc"]
+    assert c.event_time == c.received_at
+    # affiliation populated on at least the hostile ones
+    hostiles = [x for x in ctos if x.attributes["affiliation"] == "hostile"]
+    assert hostiles and hostiles[0].symbology.affiliation is not None
