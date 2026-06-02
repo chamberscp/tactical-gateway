@@ -1,15 +1,17 @@
 """KMZ parser: KML inside a zip -> list of CTOs.
 
 A KMZ file is a zip archive containing one or more KML documents and
-optional referenced overlay images. For Phase 2a we extract only the
-geographic features (points, lines, polygons) from the primary KML; image
-overlays and styles are noted but not preserved as separate artifacts.
+optional referenced overlay images. We extract only the geographic
+features (points, lines, polygons) from the primary KML; image overlays
+and styles are noted but not preserved as separate artifacts.
 
 Each placemark in the KML becomes one CTO with object_class=GRAPHIC by
-default (operational graphic from a planner). Doctrinal name parsing
-attempts to recognize common label patterns (PL ALPHA, NAI 17, FSCM types)
-and tag the CTO accordingly; unrecognized labels are still preserved
-verbatim in the `label` field.
+default (operational graphic from a planner). The placemark's label is
+run through the doctrinal recognizer (services.gateway.kmz_recognize,
+ADR-0012 D1), which produces structured SIDC, affiliation, and
+doctrinal kind. Explicit ExtendedData SIDC, when present, overrides the
+recognizer's SIDC but does not suppress the recognizer's other outputs
+(affiliation, kind, provenance entry).
 
 NetworkLinks are NOT followed (security boundary). Logged with a warning.
 Image overlays and ground overlays are ignored.
@@ -22,7 +24,7 @@ The XML namespaces handled:
 from __future__ import annotations
 
 import io
-import re
+import json
 import zipfile
 from datetime import datetime, timezone
 from typing import Iterator
@@ -44,6 +46,8 @@ from cto_schema import (
 
 from common import get_logger
 
+from .kmz_recognize import recognize
+
 log = get_logger(__name__)
 
 
@@ -57,61 +61,6 @@ _KML_NAMESPACES = [
 
 class KmzParseError(Exception):
     """Raised when KMZ contents cannot be parsed."""
-
-
-# ---------------------------------------------------------------------------
-# Doctrinal name patterns
-# ---------------------------------------------------------------------------
-
-# These patterns recognize common Marine/Army operational graphic labels
-# from B130836. When matched, we set object_class and tag attributes
-# accordingly. Not exhaustive; expanded as we encounter more patterns.
-
-_DOCTRINAL_PATTERNS = [
-    # Phase lines
-    (re.compile(r"^PL\s+\S", re.IGNORECASE), {"graphic_kind": "phase_line"}),
-    # FEBA
-    (re.compile(r"^FEBA(\s|$)", re.IGNORECASE), {"graphic_kind": "feba"}),
-    # FLOT
-    (re.compile(r"^FLOT(\s|$)", re.IGNORECASE), {"graphic_kind": "flot"}),
-    # Named Areas of Interest
-    (re.compile(r"^NAI\s+\S", re.IGNORECASE), {"graphic_kind": "nai"}),
-    # Target Areas of Interest
-    (re.compile(r"^TAI\s+\S", re.IGNORECASE), {"graphic_kind": "tai"}),
-    # No Fire Areas
-    (re.compile(r"^NFA(\s+\S|$)", re.IGNORECASE), {"graphic_kind": "nfa"}),
-    # Restricted Fire Areas
-    (re.compile(r"^RFA(\s+\S|$)", re.IGNORECASE), {"graphic_kind": "rfa"}),
-    # Restricted Operations Zones
-    (re.compile(r"^ROZ(\s+\S|$)", re.IGNORECASE), {"graphic_kind": "roz"}),
-    # Fire Support Coordination Line
-    (re.compile(r"^FSCL(\s|$)", re.IGNORECASE), {"graphic_kind": "fscl"}),
-    # Coordinated Fire Line
-    (re.compile(r"^CFL(\s|$)", re.IGNORECASE), {"graphic_kind": "cfl"}),
-    # Boundaries
-    (re.compile(r"^(BNDRY|BOUNDARY)\b", re.IGNORECASE), {"graphic_kind": "boundary"}),
-    # Objectives
-    (re.compile(r"^OBJ\s+\S", re.IGNORECASE), {"graphic_kind": "objective"}),
-    # Engagement Areas
-    (re.compile(r"^EA\s+\S", re.IGNORECASE), {"graphic_kind": "engagement_area"}),
-    # Assembly Areas
-    (re.compile(r"^AA\s+\S", re.IGNORECASE), {"graphic_kind": "assembly_area"}),
-    # Battle Positions
-    (re.compile(r"^BP\s+\S", re.IGNORECASE), {"graphic_kind": "battle_position"}),
-]
-
-
-def _classify_label(label: str) -> dict:
-    """Extract doctrinal attributes from a placemark label. Always returns
-    a dict (possibly empty) - unrecognized labels just don't get classified.
-    """
-    if not label:
-        return {}
-    label = label.strip()
-    for pattern, attrs in _DOCTRINAL_PATTERNS:
-        if pattern.search(label):
-            return dict(attrs)
-    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -195,8 +144,8 @@ def _parse_coordinates(coord_text: str) -> list[list[float]]:
 def _placemark_geometry(placemark: ET.Element) -> Geometry | None:
     """Extract a Geometry from a Placemark's first recognized geometry child."""
     # Try in order: Point, LineString, Polygon. We do not handle
-    # MultiGeometry in Phase 2a (would yield multiple CTOs from one
-    # placemark, which is doable but adds complexity); log a warning instead.
+    # MultiGeometry (would yield multiple CTOs from one placemark, which
+    # is doable but adds complexity); log a warning instead.
 
     point = _direct_find_ns(placemark, "Point")
     if point is not None:
@@ -299,12 +248,20 @@ def _placemark_to_cto(
                     placemark_name=name, feature_index=feature_index)
         return None
 
-    # Doctrinal classification from name
-    doctrinal = _classify_label(name or "")
-
-    # ExtendedData fields, including sidc if present
+    # ExtendedData fields. An explicit ExtendedData sidc, when present,
+    # wins over the recognizer's inferred SIDC because it is authoritative.
     ext_data = _placemark_extended_data(placemark)
-    sidc = ext_data.get("sidc") or ext_data.get("SIDC")
+    explicit_sidc = ext_data.get("sidc") or ext_data.get("SIDC")
+
+    # Run the doctrinal recognizer (ADR-0012 D1). Always returns a
+    # result; never None. We use its outputs for affiliation, kind, and
+    # provenance regardless of whether the SIDC was set explicitly.
+    recognition = recognize(
+        label=name,
+        description=description,
+        geometry_type=geometry.type,
+    )
+    effective_sidc = explicit_sidc or recognition.sidc
 
     attributes: dict = {
         "kmz_feature_index": feature_index,
@@ -314,14 +271,39 @@ def _placemark_to_cto(
     }
     if ext_data:
         attributes["kmz_extended_data"] = ext_data
-    if doctrinal:
-        attributes.update(doctrinal)
+    # Preserve graphic_kind for backward compatibility with Phase 2a
+    # CTOs already in the database. The recognizer's doctrinal_kind
+    # uses the same vocabulary as the old _classify_label() did.
+    if recognition.doctrinal_kind:
+        attributes["graphic_kind"] = recognition.doctrinal_kind
     if description:
         attributes["kmz_description"] = description
 
     placemark_id = placemark.get("id")
     if placemark_id:
         attributes["kmz_placemark_id"] = placemark_id
+
+    # Build the recognizer provenance step. lossy_fields lists the
+    # fields that were inferred rather than read directly from the
+    # source, so audit queries can filter for fidelity:
+    #   - SIDC is lossy unless ExtendedData carried an explicit value
+    #   - affiliation is always lossy for KMZ (no native field)
+    # For clean recognizer matches the SIDC is the canonical doctrinal
+    # value for the recognized kind; we still record it as inferred
+    # because the source KMZ did not literally carry that SIDC string.
+    recognition_lossy: list[str] = []
+    if not explicit_sidc:
+        recognition_lossy.append("sidc_2525c")
+    recognition_lossy.append("affiliation")
+
+    recognition_notes = json.dumps({
+        "matched_layer": recognition.matched_layer,
+        "status": recognition.status,
+        "doctrinal_kind": recognition.doctrinal_kind,
+        "suspected_modifier": recognition.suspected_modifier,
+        "reasons": list(recognition.reasons),
+        "explicit_sidc_used": explicit_sidc is not None,
+    })
 
     return CTO(
         uid=uuid7(),
@@ -333,18 +315,30 @@ def _placemark_to_cto(
         event_time=received_at,  # KML has no per-feature timestamp by default
         object_class=ObjectClass.GRAPHIC,
         geometry=geometry,
-        symbology=Symbology(sidc_2525c=sidc),
+        symbology=Symbology(
+            sidc_2525c=effective_sidc,
+            affiliation=Affiliation(recognition.affiliation),
+        ),
         label=name,
         remarks=description,
         attributes=attributes,
         raw_pointer=raw_pointer,
-        provenance=[ProvenanceEntry(
-            step="kmz_to_cto",
-            actor="gateway.kmz_parser",
-            at=received_at,
-            notes=None,
-            lossy_fields=[],
-        )],
+        provenance=[
+            ProvenanceEntry(
+                step="kmz_to_cto",
+                actor="gateway.kmz_parser",
+                at=received_at,
+                notes=None,
+                lossy_fields=[],
+            ),
+            ProvenanceEntry(
+                step="kmz_label_recognized",
+                actor="gateway.kmz_recognizer",
+                at=received_at,
+                notes=recognition_notes,
+                lossy_fields=recognition_lossy,
+            ),
+        ],
     )
 
 
