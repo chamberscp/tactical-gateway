@@ -1,8 +1,9 @@
 # Phase 2b-2 — Overlay Converter
 
-**Status:** scoped, not started
+**Status:** decisions ratified, ready to build
 **Builds on:** Phase 2b-1 (OVL ingest), Phase 2a (KMZ ingest + opstore)
 **Tag on completion:** `phase2b-2`
+**Locked decisions:** ADR-0012
 
 ---
 
@@ -21,182 +22,233 @@ not an admin configuring routes. Typical flow:
 
 The reverse direction (OVL in, KMZ out) is the equally common case.
 
-The work also closes two longstanding gaps deferred from earlier phases:
+The phase also closes two longstanding gaps deferred from earlier work:
 the `CTO → OVL` writer (originally part of Phase 2's bidirectional
 scope) and the `CTO → KMZ` writer (carved out of Phase 2a when ingest
-was split off to ship faster).
+was split off to ship faster), and widens the KMZ ingest recognizer in
+the process — see §3 and ADR-0012.
 
-## 2. Scope
+## 2. Scope summary
 
-### 2.1 Writers (the real work)
+Four deliverables (one more than the original scope; the recognizer
+widening was added when D1 was ratified):
 
-- **`CTO → OVL`.** Generate a valid GCCS-J / Agile overlay file from a
-  set of CTOs. Symbology emitted from `sidc_2525d`. Modifiers, label,
-  visibility flags, and geometry restored from CTO fields populated by
-  the ingest path. Validated against the two real planner overlay
-  fixtures used in Phase 2b-1.
-- **`CTO → KMZ`.** Generate a valid KMZ from a set of CTOs. Point,
-  LineString, and Polygon supported. Doctrinal names (PL, NAI, OBJ,
-  etc.) preserved on the way out so Google Earth shows sensible labels.
+| # | Deliverable | Why it's in this phase |
+|---|---|---|
+| 1 | **KMZ ingest recognizer widening** | D1 puts label-interpretation smarts in the ingest, not the writer. Every downstream consumer benefits. |
+| 2 | **`CTO → OVL` writer** | Core deferred work. Inverts the Phase 2b-1 parser. |
+| 3 | **`CTO → KMZ` writer** | Core deferred work. Implements the D2 round-trip strategy. |
+| 4 | **Converter web page** | Operator-facing surface for items 2 and 3. |
 
-### 2.2 Converter web page
+Plus tests, ADR, README, and tag, as usual.
 
-- One page served by the gateway at `/convert` (path final at build time).
-- Drag-and-drop or file-picker for the input file.
-- Two buttons: **Convert to OVL** and **Convert to KMZ** (the button
-  corresponding to the input format is disabled, since "KMZ → KMZ" is
-  not the use case).
-- Result panel below shows: the download link for the converted file,
-  and the fidelity report inline.
-- No authentication, no styling beyond legible. This is an operator
-  utility, not a product surface.
-- No persistent storage of uploads beyond the existing raw-capture
-  pipeline (the upload goes through the same capture writer as any
-  other ingest, so it lands in MinIO with its SHA in the chain — same
-  audit story as folder ingest).
+## 3. Scope detail
 
-### 2.3 Fidelity report
+### 3.1 KMZ ingest recognizer widening *(new — from ratified D1)*
 
-Both writers emit a structured fidelity report alongside the file:
+The Phase 2a KMZ ingest recognizes a short list of doctrinal prefixes.
+D1 (see ADR-0012) extends it to a five-layer recognition pipeline:
 
-- Count of objects translated cleanly.
-- Count of objects translated with best-effort defaults (with reasons).
-- Count of objects that could not be represented (with reasons).
-- List of fields dropped on the destination side (e.g. SIDC modifiers
-  not expressible in KMZ).
+1. **Extended doctrinal prefix table.** Adds LOA, LD/LDLC, FLOT/FEBA,
+   SP/RP, CP/CCP, HA, SBF, ATK, PZ/LZ/DZ, MSR/ASR, TRP, AO, RFL/NFL to
+   the existing list. Full mapping in `services/gateway/kmz/prefix_table.py`.
+2. **Target designator pattern.** `^[A-Z]{1,2}\d{3,4}\b` (e.g. `AB1001`)
+   → target reference point SIDC.
+3. **Word-based recognition.** Labels containing `checkpoint`,
+   `control point`, `bridge`, or `objective` (case-insensitive) map to
+   the corresponding feature SIDCs.
+4. **"Suspected " modifier.** Labels beginning with `Suspected ` apply
+   the suspected variant to the SIDC standard-identity (character 2).
+5. **Geometry fallback.** Unresolved labels get a generic
+   shape-derived SIDC, marked best-effort, label preserved verbatim.
 
-The report is shown on the converter page in plain language, and is
-attached to the CTO `provenance` chain as a step entry so the audit
-trail captures what happened.
+Routes preserve operator labels verbatim. Coalition / foreign-language
+conventions are out of scope for v1.
 
-### 2.4 Round-trip tests
+Result: every KMZ ingest produces a CTO with structured symbology
+fields (SIDC, affiliation, doctrinal kind) — not just geometry +
+label — that the OVL writer can emit directly.
 
-For each direction:
+### 3.2 `CTO → OVL` writer
 
-- Take a real fixture (OVL or KMZ), ingest it to CTOs, emit the
-  opposite format, ingest *that* back, and diff the resulting CTOs
-  against the originals.
-- Quantify the loss explicitly. KMZ ↔ OVL is lossy by format design
-  (OVL carries SIDC, KMZ does not), so the test asserts the *known*
-  loss boundaries rather than zero loss.
-- Same-format round-trip (OVL → CTO → OVL, KMZ → CTO → KMZ) is
-  expected to be near-lossless and is tested as such.
+* Emits a valid GCCS-J / Agile overlay file from a set of CTOs.
+* SIDC, modifiers, label, visibility flags, and geometry restored from
+  CTO fields populated by ingest.
+* Schema target: the real `<MODEL>/<milbobject>` form (same target as
+  the Phase 2b-1 parser; ADR-0011).
+* Validated against the two real planner overlay fixtures used in 2b-1.
+* Module: `services/gateway/ovl/writer.py`.
 
-## 3. Out of scope
+### 3.3 `CTO → KMZ` writer
 
-- **Bulk / multi-file conversion.** One file in, one file out. If
-  needed later, the same writers serve it without re-architecting.
-- **Route-engine integration.** Once writers exist, the route engine
+* Emits a valid KMZ from a set of CTOs.
+* Geometry: Point, LineString, Polygon.
+* Label: operator's doctrinal label (`PL ALPHA`), not the SIDC string.
+* Color: derived from `affiliation` per the D2 mapping (friend blue,
+  hostile red, neutral green, unknown yellow).
+* `<description>` field carries both a visible HTML representation and
+  a hidden machine-readable block (sentinel `<!-- TGCTO-BEGIN ...
+  TGCTO-END -->`) for lossless round-trip. See ADR-0012 D2.
+* Module: `services/gateway/kmz/writer.py` (note: ingest moved from
+  `kmz_ingest.py` here into a `kmz/` package as part of this work to
+  keep ingest and egress symmetric).
+
+### 3.4 Converter web page
+
+* Single page served by the gateway at `/convert` (final path locked
+  in implementation).
+* Drag-and-drop *and* a file-picker (drag-and-drop is the primary UX;
+  picker is the keyboard / screen-reader path).
+* Two buttons: **Convert to OVL** and **Convert to KMZ**. The button
+  corresponding to the input format is disabled — same-format
+  conversion is not a use case.
+* Result panel below shows: the download link for the converted file
+  and the fidelity report rendered in plain language.
+* No authentication, no styling beyond legible. Operator utility, not
+  a product surface.
+* Upload path is **first-class ingest** (D3): the uploaded bytes
+  traverse `CaptureWriter.capture()` exactly as a folder-drop does,
+  landing in MinIO with their SHA in the hash chain. CTOs from a
+  converter upload carry `ingest_source = "upload"` distinct from the
+  existing `"folder"` value.
+* Endpoint module: `services/gateway/convert_api.py`.
+* The HTML/CSS/JS for the page lives next to it as a single small
+  template (no SPA, no build step, no client framework).
+
+### 3.5 Fidelity report
+
+Both writers emit a structured JSON fidelity report alongside the file
+(schema in ADR-0012 D4). The page renders it inline in plain language;
+the JSON is also exposed via the API for programmatic consumers. A
+condensed version is attached to each resulting CTO's `provenance`
+chain.
+
+### 3.6 Round-trip tests
+
+* **Cross-format round-trip** (KMZ → CTO → OVL → CTO → KMZ and the
+  reverse): asserts the known loss boundaries — affiliation and
+  doctrinal label survive; SIDC string survives via the hidden
+  payload; modifier fields survive only when the destination format
+  can carry them.
+* **Same-format round-trip** (OVL → CTO → OVL, KMZ → CTO → KMZ):
+  expected near-lossless; asserts as such.
+* Test fixtures: the two Phase 2b-1 OVL fixtures plus the Phase 2a
+  KMZ fixture, plus at least one synthetic KMZ that exercises every
+  D1 recognizer layer.
+
+## 4. Out of scope
+
+* **Bulk / multi-file conversion.** One file in, one file out. The
+  writers themselves are perfectly capable of bulk; the page UX is
+  not. Add later if asked for.
+* **Route-engine integration.** Once writers exist, the route engine
   can subscribe to `cto.normalized.*` and emit OVL/KMZ to live
-  destinations — that's a follow-on once we have a concrete consumer
-  asking for it.
-- **Folder-mirror auto-emit.** Considered and rejected for this phase:
-  it's a worse UX than the converter page for non-technical users
-  (silent failures, no fidelity feedback, naming conventions to learn,
-  loop-avoidance footguns). Trivial to add later if a real use case
+  destinations. Follow-on once we have a concrete consumer.
+* **Folder-mirror auto-emit** ("drop a KMZ, get an OVL next to it").
+  Considered and rejected: the converter page is a better UX for
+  non-technical users (visible feedback, fidelity report, no
+  loop-avoidance footguns). Ten lines to add later if a real use case
   appears.
-- **Editing on the page.** Users cannot modify the overlay in the
-  browser. They convert format only.
-- **Auth / RBAC.** Deferred to Phase 5 hardening.
+* **Editing on the page.** Format conversion only; no in-browser
+  geometry edits, label edits, or symbol picker.
+* **Auth / RBAC.** Deferred to Phase 5 hardening.
+* **Coalition / foreign-language naming.** Out of scope for v1 of the
+  recognizer (ADR-0012 D1).
 
-## 4. Deliverables
+## 5. Decisions (locked)
 
-1. `services/gateway/ovl/writer.py` — CTO → OVL writer module.
-2. `services/gateway/kmz_egress.py` — CTO → KMZ writer module.
-3. `services/gateway/convert_api.py` — the converter endpoint(s) and
-   the small HTML page.
-4. Two new integration tests under `tests/integration/`:
-   - `test_kmz_to_ovl_roundtrip.py`
-   - `test_ovl_to_kmz_roundtrip.py`
-5. ADR-0012 — Overlay writers and fidelity-report model.
-6. `PHASE2B2_README.md` — same shape as the prior phase READMEs.
+All four locked decisions are documented in **ADR-0012**.
+Summary for quick reference:
 
-## 5. Decisions to lock in before code
+* **D1.** KMZ ingest is widened; KMZ→OVL never silently drops.
+  Five-layer recognition pipeline. Smarts in ingest, not writer.
+* **D2.** OVL→KMZ degrades gracefully. Color from affiliation;
+  SIDC and modifiers in `<description>` with hidden round-trip
+  payload behind `<!-- TGCTO-BEGIN ... -->` sentinel.
+* **D3.** Converter uploads are first-class ingest. Capture chain
+  applies. `ingest_source = "upload"`.
+* **D4.** Fidelity report has a fixed JSON shape; page renders it in
+  plain language; CTO provenance carries a condensed version.
 
-These are the equivalents of Phase 2b-1's D1/D2/D3. They need answers
-at the top of the build, not during it.
+## 6. Deliverables (file list)
 
-### D1 — When KMZ → OVL needs a SIDC and the source has only a label, what do we do?
+1. ADR-0012 — Overlay writers, fidelity reporting, and KMZ name
+   recognition.  *(done)*
+2. Widened recognizer:
+   * `services/gateway/kmz/prefix_table.py` — extended prefix mapping.
+   * `services/gateway/kmz/recognize.py` — five-layer recognition pipeline.
+   * Updates to `services/gateway/kmz/ingest.py` (was `kmz_ingest.py`,
+     moved into the `kmz/` package for symmetry with `ovl/`).
+3. Writers:
+   * `services/gateway/ovl/writer.py`
+   * `services/gateway/kmz/writer.py`
+4. Converter:
+   * `services/gateway/convert_api.py`
+   * `services/gateway/convert.html` (template, served by the API).
+5. Tests:
+   * `tests/unit/test_kmz_recognizer.py` — every layer of D1.
+   * `tests/integration/test_kmz_to_ovl_roundtrip.py`
+   * `tests/integration/test_ovl_to_kmz_roundtrip.py`
+   * `tests/integration/test_converter_endpoint.py`
+6. `PHASE2B2_README.md` — operator-facing usage doc.
+7. Tag `phase2b-2`.
 
-KMZ doesn't carry SIDC. To produce an OVL, the writer must assign one.
-The Phase 2a ingest already recognises doctrinal name prefixes (PL,
-NAI, TAI, OBJ, NFA, RFA, ROZ, FSCL, CFL, BNDRY, EA, AA, BP) and stores
-the `graphic_kind`. Proposed rule:
+## 7. Build order
 
-- If `graphic_kind` is known and maps to a SIDC in the B130836 mapping
-  table → emit that SIDC, mark *clean* in the fidelity report.
-- If `graphic_kind` is known but ambiguous (e.g. PL has multiple SIDC
-  variants) → emit the most general variant, mark *best-effort*.
-- If no `graphic_kind` and the geometry suggests a class (a Point with
-  no doctrinal label) → emit the generic unknown-affiliation SIDC for
-  that geometry, mark *best-effort*.
-- Otherwise → drop the object from the OVL, list it in the fidelity
-  report's "not representable" section.
+1. **Widened recognizer + unit tests.** D1's recognition pipeline is
+   shared infrastructure; it has to land before either writer is
+   meaningful. Smallest, most testable starting point.
+2. **`CTO → OVL` writer + unit tests.** Inverts the 2b-1 parser
+   against the same fixtures. Validate same-format round-trip.
+3. **`CTO → KMZ` writer + unit tests.** Implements the D2 hidden-
+   payload trick. Validate same-format round-trip.
+4. **Cross-format round-trip integration tests.** Quantifies the
+   honest loss boundaries.
+5. **Converter API + page.** Thin wrapper. Validates D3 end-to-end.
+6. **README, smoke test in the dev stack, tag.**
 
-Confirm or override before build.
+## 8. Risks
 
-### D2 — When OVL → KMZ has rich SIDC data the KMZ format can't represent, what survives?
-
-KMZ's representational capacity is much smaller. Proposed rule: KMZ
-output preserves geometry, label, doctrinal-name kind (so Google Earth
-labels remain meaningful), and color/style as a best-effort hint from
-affiliation (friend = blue, hostile = red, neutral = green, unknown =
-yellow — matching MIL-STD-2525 conventions). Modifiers, SIDC string,
-and overlay name are recorded in the KML `<description>` as plain text
-so they round-trip back on re-ingest, but they're not driving rendering.
-
-Confirm or override.
-
-### D3 — Where does the uploaded file go?
-
-Two reasonable choices:
-
-- **Treat it as ingest.** Run it through the same capture writer; it
-  lands in MinIO with its SHA in the daily chain, just like a
-  folder-drop. The converter is then "a thin wrapper around the
-  existing ingest + a writer call." Best for audit consistency.
-- **Treat it as ephemeral.** Hold the bytes in memory just long enough
-  to convert, then discard. Avoids cluttering the chain with files
-  that may be the same overlay re-uploaded by multiple people. Faster.
-
-Proposed: **treat it as ingest.** The audit trail value outweighs the
-chain volume. The chain already deduplicates by SHA so re-uploads of
-the same file are idempotent.
-
-Confirm or override.
-
-## 6. Risks
-
-- **OVL writer fidelity vs. real GCCS-J consumers.** We have the
+* **OVL writer fidelity vs. real GCCS-J consumers.** We have the
   schema and two real fixtures but no SIPR-side instance to load the
   emitted OVL into. Mitigation: keep the writer code isolated so
   swapping in fixes after a real test is small; lean heavily on the
   round-trip test as the validation that the bytes are at least
   internally consistent.
-- **Symbol coverage gaps.** B130836 enumerates the doctrinally
-  important graphics, but planners can technically draw anything. The
-  fidelity report is the honest answer — best-effort is documented,
-  not hidden.
-- **User confusion when fidelity report shows loss.** Mitigation: the
-  page wording is "we converted N of M cleanly, here's what changed,"
-  not "FAILED." The file is still given to them.
+* **Symbol coverage gaps.** B130836 enumerates the doctrinally
+  important graphics, but planners can technically draw anything.
+  The fidelity report is the honest answer — best-effort is
+  documented, not hidden.
+* **User confusion when fidelity report shows loss.** Mitigation:
+  the page wording is "we converted N of M cleanly, here's what
+  changed," not "FAILED." The file is still given to them.
+* **Recognizer false positives.** Word-based recognition could mis-
+  classify (e.g. a label like "Possible bridge location" gets the
+  bridge SIDC). The recognizer marks word-based matches best-effort
+  precisely so the operator on the destination side sees the flag
+  and can adjust. Mitigation is honesty in the fidelity report, not
+  trying to eliminate ambiguity that the source data doesn't resolve.
 
-## 7. Definition of done
+## 9. Definition of done
 
-- Both writers implemented with unit tests.
-- Round-trip integration tests pass against the real fixtures.
-- Converter page works end-to-end in the dev stack: drop a `.kmz`,
+* All four deliverables implemented with unit tests passing.
+* Cross-format and same-format round-trip integration tests pass
+  against the real fixtures.
+* Converter page works end-to-end in the dev stack: drop a `.kmz`,
   get a `.ovl` plus an inline fidelity report; same in reverse.
-- ADR-0012 written and merged.
-- `PHASE2B2_README.md` documents how to use the converter and what
-  the fidelity-report fields mean.
-- Tagged `phase2b-2` on the same branch.
+* Hash chain verified after a converter upload (`CHAIN OK`).
+* ADR-0012 finalized; `PHASE2B2_README.md` written.
+* Tagged `phase2b-2` on a commit that smoke-tests green.
 
-## 8. Estimated shape (not a commitment)
+## 10. Estimated shape (not a commitment)
 
-- Writers + tests: most of the work. Comparable to the OVL parser
-  effort, since you're inverting the same mapping table.
-- Converter page + endpoint: a single day at most. Boring code.
-- ADR + README: an evening.
+* Recognizer widening + unit tests: small. A day, maybe two.
+* Writers + unit tests + same-format round-trips: most of the work.
+  Comparable to the OVL parser effort, since we're inverting the same
+  mapping table.
+* Cross-format round-trip tests: small if the writers are clean.
+* Converter page + endpoint: a single sitting at most. Boring code,
+  no novel patterns.
+* ADR (done) + README + tag mechanics: an evening.
 
 Net: a phase of similar size to 2b-1.
