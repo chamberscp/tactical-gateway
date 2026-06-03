@@ -10,8 +10,9 @@ default (operational graphic from a planner). The placemark's label is
 run through the doctrinal recognizer (services.gateway.kmz_recognize,
 ADR-0012 D1), which produces structured SIDC, affiliation, and
 doctrinal kind. Explicit ExtendedData SIDC, when present, overrides the
-recognizer's SIDC but does not suppress the recognizer's other outputs
-(affiliation, kind, provenance entry).
+recognizer's SIDC AND drives the affiliation (decoded from position 2
+of the explicit SIDC), since an externally-supplied SIDC is the
+authoritative signal.
 
 NetworkLinks are NOT followed (security boundary). Logged with a warning.
 Image overlays and ground overlays are ignored.
@@ -46,7 +47,7 @@ from cto_schema import (
 
 from common import get_logger
 
-from .kmz_recognize import recognize
+from .kmz_recognize import affiliation_from_explicit_sidc, recognize
 
 log = get_logger(__name__)
 
@@ -109,12 +110,7 @@ def _text_of(elem: ET.Element | None) -> str | None:
 
 
 def _parse_coordinates(coord_text: str) -> list[list[float]]:
-    """Parse KML <coordinates> text into a list of [lon, lat, (alt)] tuples.
-
-    KML coordinate format: 'lon,lat[,alt] lon,lat[,alt] ...' with
-    whitespace separation between tuples and commas within. Whitespace
-    includes newlines, so we normalize before splitting.
-    """
+    """Parse KML <coordinates> text into a list of [lon, lat, (alt)] tuples."""
     points: list[list[float]] = []
     for token in coord_text.replace("\n", " ").replace("\t", " ").split():
         token = token.strip().rstrip(",")
@@ -143,9 +139,6 @@ def _parse_coordinates(coord_text: str) -> list[list[float]]:
 
 def _placemark_geometry(placemark: ET.Element) -> Geometry | None:
     """Extract a Geometry from a Placemark's first recognized geometry child."""
-    # Try in order: Point, LineString, Polygon. We do not handle
-    # MultiGeometry (would yield multiple CTOs from one placemark, which
-    # is doable but adds complexity); log a warning instead.
 
     point = _direct_find_ns(placemark, "Point")
     if point is not None:
@@ -178,11 +171,9 @@ def _placemark_geometry(placemark: ET.Element) -> Geometry | None:
                     pts = _parse_coordinates(coords_elem.text)
                     if len(pts) >= 3:
                         ring = [[p[0], p[1]] for p in pts]
-                        # KML doesn't require closed rings; close if needed
                         if ring[0] != ring[-1]:
                             ring.append(ring[0])
                         rings.append(ring)
-        # Inner rings (holes)
         for inner in _findall_ns(polygon, "innerBoundaryIs"):
             ring_elem = _find_ns(inner, "LinearRing")
             if ring_elem is not None:
@@ -201,11 +192,9 @@ def _placemark_geometry(placemark: ET.Element) -> Geometry | None:
     if multi is not None:
         log.warning("kmz placemark has MultiGeometry; only first child extracted",
                     placemark_name=_text_of(_direct_find_ns(placemark, "name")))
-        # Recurse into the multi
         for child in list(multi):
             tag = _strip_ns(child.tag)
             if tag in ("Point", "LineString", "Polygon"):
-                # Build a synthetic placemark holding this single geometry
                 fake = ET.Element("Placemark")
                 fake.append(child)
                 return _placemark_geometry(fake)
@@ -249,19 +238,37 @@ def _placemark_to_cto(
         return None
 
     # ExtendedData fields. An explicit ExtendedData sidc, when present,
-    # wins over the recognizer's inferred SIDC because it is authoritative.
+    # wins over the recognizer's inferred SIDC and *also* drives the
+    # affiliation (decoded from SIDC position 2), because an externally
+    # supplied SIDC is the authoritative signal for both.
     ext_data = _placemark_extended_data(placemark)
     explicit_sidc = ext_data.get("sidc") or ext_data.get("SIDC")
 
     # Run the doctrinal recognizer (ADR-0012 D1). Always returns a
-    # result; never None. We use its outputs for affiliation, kind, and
+    # result; never None. We use its outputs for doctrinal kind and
     # provenance regardless of whether the SIDC was set explicitly.
     recognition = recognize(
         label=name,
         description=description,
         geometry_type=geometry.type,
     )
+
+    # Resolve effective SIDC and affiliation. Explicit SIDC is the
+    # source of truth when present; the affiliation it implies
+    # overrides the recognizer's description-hint-based affiliation.
     effective_sidc = explicit_sidc or recognition.sidc
+    if explicit_sidc:
+        explicit_affil = affiliation_from_explicit_sidc(explicit_sidc)
+        if explicit_affil is not None:
+            effective_affiliation = explicit_affil
+            effective_affiliation_source = "explicit_sidc"
+        else:
+            # Malformed explicit SIDC — fall back to recognizer.
+            effective_affiliation = recognition.affiliation
+            effective_affiliation_source = recognition.affiliation_source
+    else:
+        effective_affiliation = recognition.affiliation
+        effective_affiliation_source = recognition.affiliation_source
 
     attributes: dict = {
         "kmz_feature_index": feature_index,
@@ -271,9 +278,6 @@ def _placemark_to_cto(
     }
     if ext_data:
         attributes["kmz_extended_data"] = ext_data
-    # Preserve graphic_kind for backward compatibility with Phase 2a
-    # CTOs already in the database. The recognizer's doctrinal_kind
-    # uses the same vocabulary as the old _classify_label() did.
     if recognition.doctrinal_kind:
         attributes["graphic_kind"] = recognition.doctrinal_kind
     if description:
@@ -285,16 +289,14 @@ def _placemark_to_cto(
 
     # Build the recognizer provenance step. lossy_fields lists the
     # fields that were inferred rather than read directly from the
-    # source, so audit queries can filter for fidelity:
-    #   - SIDC is lossy unless ExtendedData carried an explicit value
-    #   - affiliation is always lossy for KMZ (no native field)
-    # For clean recognizer matches the SIDC is the canonical doctrinal
-    # value for the recognized kind; we still record it as inferred
-    # because the source KMZ did not literally carry that SIDC string.
+    # source.
     recognition_lossy: list[str] = []
     if not explicit_sidc:
         recognition_lossy.append("sidc_2525c")
-    recognition_lossy.append("affiliation")
+    if effective_affiliation_source != "explicit_sidc":
+        # Affiliation came from description hints or the configured
+        # default, not from a direct source signal.
+        recognition_lossy.append("affiliation")
 
     recognition_notes = json.dumps({
         "matched_layer": recognition.matched_layer,
@@ -303,6 +305,7 @@ def _placemark_to_cto(
         "suspected_modifier": recognition.suspected_modifier,
         "reasons": list(recognition.reasons),
         "explicit_sidc_used": explicit_sidc is not None,
+        "affiliation_source": effective_affiliation_source,
     })
 
     return CTO(
@@ -312,12 +315,12 @@ def _placemark_to_cto(
         source_protocol=SourceProtocol.KMZ,
         ingest_source=ingest_source,
         received_at=received_at,
-        event_time=received_at,  # KML has no per-feature timestamp by default
+        event_time=received_at,
         object_class=ObjectClass.GRAPHIC,
         geometry=geometry,
         symbology=Symbology(
             sidc_2525c=effective_sidc,
-            affiliation=Affiliation(recognition.affiliation),
+            affiliation=Affiliation(effective_affiliation),
         ),
         label=name,
         remarks=description,
@@ -348,11 +351,7 @@ def _placemark_to_cto(
 
 
 def _read_primary_kml(kmz_bytes: bytes) -> bytes:
-    """Find and return the primary KML document inside a KMZ archive.
-
-    The OGC standard says doc.kml is the default but isn't required.
-    If doc.kml is not present, use the first .kml found.
-    """
+    """Find and return the primary KML document inside a KMZ archive."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(kmz_bytes))
     except zipfile.BadZipFile as e:
@@ -383,19 +382,13 @@ def kmz_to_ctos(
     raw_pointer: RawPointer,
     ingest_source: IngestSource,
 ) -> list[CTO]:
-    """Parse a KMZ file and produce one CTO per placemark.
-
-    `filename` is the original filename (used to set parent_kmz_filename
-    on each CTO).
-    `raw_pointer` points to the captured KMZ bytes in MinIO.
-    """
+    """Parse a KMZ file and produce one CTO per placemark."""
     kml_bytes = _read_primary_kml(kmz_bytes)
     try:
         kml_root = ET.fromstring(kml_bytes)
     except ET.ParseError as e:
         raise KmzParseError(f"invalid KML inside KMZ: {e}") from e
 
-    # Count and warn about NetworkLinks
     networklink_count = sum(1 for elem in kml_root.iter()
                            if _strip_ns(elem.tag) == "NetworkLink")
     if networklink_count > 0:

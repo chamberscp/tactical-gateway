@@ -93,6 +93,7 @@ services:
       ROUTES_CONFIG_PATH: /etc/gateway/routes.yaml
       KMZ_INBOX_PATH: /var/lib/tactical-gateway/inbox/kmz
       KMZ_INBOX_POLL_INTERVAL_S: "2.0"
+      KMZ_DEFAULT_AFFILIATION: friend
     ports:
       - "127.0.0.1:8000:8000"   # HTTP API
       - "127.0.0.1:8087:8087"   # CoT XML TCP

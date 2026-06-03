@@ -9,7 +9,7 @@ KMZ parser correctly:
   4. Records a `kmz_label_recognized` ProvenanceEntry with the right
      lossy_fields and a parseable JSON notes payload.
   5. Lets an explicit <ExtendedData sidc=...> override the recognizer's
-     SIDC while still using the recognizer for other fields.
+     SIDC AND drive the affiliation from its position-2 character.
 
 No I/O, no infrastructure; fast.
 """
@@ -32,7 +32,6 @@ from services.gateway.kmz_parser import kmz_to_ctos
 
 
 def _make_kmz(placemarks_kml: str) -> bytes:
-    """Wrap raw <Placemark> KML in a minimal KMZ and return the zip bytes."""
     kml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
@@ -55,7 +54,6 @@ def _fake_raw_pointer() -> RawPointer:
 
 
 def _parse(kmz_bytes: bytes):
-    """Run the parser with the standard test fixtures."""
     return kmz_to_ctos(
         kmz_bytes=kmz_bytes,
         filename="test.kmz",
@@ -67,7 +65,6 @@ def _parse(kmz_bytes: bytes):
 
 
 def _recognition_step(cto):
-    """Find the kmz_label_recognized provenance entry on a CTO."""
     for entry in cto.provenance:
         if entry.step == "kmz_label_recognized":
             return entry
@@ -78,7 +75,6 @@ def _recognition_step(cto):
 
 
 class TestRecognitionFlowsIntoCto:
-    """The recognizer's outputs land on the CTO in the expected fields."""
 
     def test_pl_alpha_populates_symbology(self):
         kmz = _make_kmz("""
@@ -92,12 +88,9 @@ class TestRecognitionFlowsIntoCto:
         ctos = _parse(kmz)
         assert len(ctos) == 1
         c = ctos[0]
-        # Recognizer produced a SIDC; parser stored it.
         assert c.symbology.sidc_2525c is not None
         assert len(c.symbology.sidc_2525c) == 15
-        # Affiliation is unknown (no description hint).
         assert c.symbology.affiliation == Affiliation.UNKNOWN
-        # graphic_kind preserved for backward compatibility.
         assert c.attributes["graphic_kind"] == "phase_line"
 
     def test_obj_target_with_enemy_description_yields_hostile(self):
@@ -111,7 +104,6 @@ class TestRecognitionFlowsIntoCto:
         ctos = _parse(kmz)
         c = ctos[0]
         assert c.symbology.affiliation == Affiliation.HOSTILE
-        # SIDC position 2 should be 'H'.
         assert c.symbology.sidc_2525c[1] == "H"
 
     def test_suspected_prefix_yields_suspect(self):
@@ -126,17 +118,19 @@ class TestRecognitionFlowsIntoCto:
         ctos = _parse(kmz)
         c = ctos[0]
         assert c.symbology.affiliation == Affiliation.SUSPECT
-        # graphic_kind is from the underlying EA prefix.
         assert c.attributes["graphic_kind"] == "engagement_area"
 
-    def test_explicit_extendeddata_sidc_wins(self):
-        """An explicit <ExtendedData sidc=...> should override the
-        recognizer's SIDC, but other recognizer outputs still apply."""
+
+class TestExplicitSidcDrivesAffiliation:
+    """The NAI 99 finding: when an explicit ExtendedData SIDC is supplied,
+    it drives both the SIDC field AND the affiliation field consistently."""
+
+    def test_explicit_friend_sidc_yields_friend_affiliation(self):
         kmz = _make_kmz("""
           <Placemark>
-            <name>NAI 7</name>
+            <name>NAI 99</name>
             <ExtendedData>
-              <Data name="sidc"><value>GFGPGAA-------X</value></Data>
+              <Data name="sidc"><value>GFGPGPRN-------</value></Data>
             </ExtendedData>
             <Polygon><outerBoundaryIs><LinearRing><coordinates>
               -77.5,34.5,0 -77.4,34.5,0 -77.4,34.6,0 -77.5,34.5,0
@@ -145,20 +139,106 @@ class TestRecognitionFlowsIntoCto:
         """)
         ctos = _parse(kmz)
         c = ctos[0]
-        # Explicit SIDC kept verbatim.
-        assert c.symbology.sidc_2525c == "GFGPGAA-------X"
-        # But graphic_kind still came from the recognizer (NAI prefix).
-        assert c.attributes["graphic_kind"] == "named_area_of_interest"
-        # The provenance step records that explicit SIDC was used.
-        prov = _recognition_step(c)
+        # Explicit SIDC preserved verbatim.
+        assert c.symbology.sidc_2525c == "GFGPGPRN-------"
+        # And the affiliation field reflects the SIDC's position 2.
+        assert c.symbology.affiliation == Affiliation.FRIEND
+
+    def test_explicit_hostile_sidc_yields_hostile_affiliation(self):
+        kmz = _make_kmz("""
+          <Placemark>
+            <name>Some target</name>
+            <ExtendedData>
+              <Data name="sidc"><value>GHGPDPT--------</value></Data>
+            </ExtendedData>
+            <Point><coordinates>-77.4,34.5,0</coordinates></Point>
+          </Placemark>
+        """)
+        ctos = _parse(kmz)
+        c = ctos[0]
+        assert c.symbology.sidc_2525c == "GHGPDPT--------"
+        assert c.symbology.affiliation == Affiliation.HOSTILE
+
+    def test_explicit_sidc_beats_description_hint(self):
+        """An explicit SIDC saying 'friend' wins over a description hint
+        saying 'enemy'. The SIDC is the authoritative signal."""
+        kmz = _make_kmz("""
+          <Placemark>
+            <name>Contradictory thing</name>
+            <description>enemy assembly observed</description>
+            <ExtendedData>
+              <Data name="sidc"><value>GFGPGPRN-------</value></Data>
+            </ExtendedData>
+            <Polygon><outerBoundaryIs><LinearRing><coordinates>
+              -77.5,34.5,0 -77.4,34.5,0 -77.4,34.6,0 -77.5,34.5,0
+            </coordinates></LinearRing></outerBoundaryIs></Polygon>
+          </Placemark>
+        """)
+        ctos = _parse(kmz)
+        c = ctos[0]
+        assert c.symbology.affiliation == Affiliation.FRIEND
+
+    def test_provenance_records_explicit_sidc_as_source(self):
+        kmz = _make_kmz("""
+          <Placemark>
+            <name>NAI 99</name>
+            <ExtendedData>
+              <Data name="sidc"><value>GFGPGPRN-------</value></Data>
+            </ExtendedData>
+            <Polygon><outerBoundaryIs><LinearRing><coordinates>
+              -77.5,34.5,0 -77.4,34.5,0 -77.4,34.6,0 -77.5,34.5,0
+            </coordinates></LinearRing></outerBoundaryIs></Polygon>
+          </Placemark>
+        """)
+        ctos = _parse(kmz)
+        prov = _recognition_step(ctos[0])
         payload = json.loads(prov.notes)
         assert payload["explicit_sidc_used"] is True
-        # sidc_2525c should NOT be in lossy_fields when explicit.
-        assert "sidc_2525c" not in prov.lossy_fields
+        assert payload["affiliation_source"] == "explicit_sidc"
+
+    def test_lossy_fields_empty_when_explicit_sidc_drives_affiliation(self):
+        """When explicit SIDC drives the affiliation, neither sidc_2525c
+        nor affiliation was inferred — both came directly from the source.
+        lossy_fields should reflect that."""
+        kmz = _make_kmz("""
+          <Placemark>
+            <name>NAI 99</name>
+            <ExtendedData>
+              <Data name="sidc"><value>GFGPGPRN-------</value></Data>
+            </ExtendedData>
+            <Polygon><outerBoundaryIs><LinearRing><coordinates>
+              -77.5,34.5,0 -77.4,34.5,0 -77.4,34.6,0 -77.5,34.5,0
+            </coordinates></LinearRing></outerBoundaryIs></Polygon>
+          </Placemark>
+        """)
+        ctos = _parse(kmz)
+        prov = _recognition_step(ctos[0])
+        assert prov.lossy_fields == []  # neither field was inferred
+
+    def test_malformed_explicit_sidc_falls_back_to_recognizer(self):
+        """If the explicit SIDC isn't 15 chars or has an unknown
+        identity char, fall back to the recognizer's affiliation."""
+        kmz = _make_kmz("""
+          <Placemark>
+            <name>NAI 99</name>
+            <description>enemy here</description>
+            <ExtendedData>
+              <Data name="sidc"><value>bogus</value></Data>
+            </ExtendedData>
+            <Polygon><outerBoundaryIs><LinearRing><coordinates>
+              -77.5,34.5,0 -77.4,34.5,0 -77.4,34.6,0 -77.5,34.5,0
+            </coordinates></LinearRing></outerBoundaryIs></Polygon>
+          </Placemark>
+        """)
+        ctos = _parse(kmz)
+        c = ctos[0]
+        # SIDC preserved verbatim (parser stores what was given), but
+        # affiliation falls back to recognizer's description-derived value.
+        assert c.symbology.sidc_2525c == "bogus"
+        assert c.symbology.affiliation == Affiliation.HOSTILE
 
 
 class TestRecognitionProvenance:
-    """The kmz_label_recognized provenance step carries the right data."""
 
     def test_provenance_step_is_appended(self):
         kmz = _make_kmz("""
@@ -188,10 +268,9 @@ class TestRecognitionProvenance:
         assert payload["doctrinal_kind"] == "phase_line"
         assert "reasons" in payload
         assert isinstance(payload["reasons"], list)
+        assert "affiliation_source" in payload
 
     def test_best_effort_match_marks_lossy_fields(self):
-        """An unrecognized label should populate lossy_fields with both
-        sidc_2525c and affiliation, since both were inferred."""
         kmz = _make_kmz("""
           <Placemark>
             <name>Chuck's house</name>
@@ -204,9 +283,6 @@ class TestRecognitionProvenance:
         assert "affiliation" in prov.lossy_fields
 
     def test_clean_match_still_marks_inferred_fields(self):
-        """Even when the recognizer makes a clean match, the SIDC and
-        affiliation were not literally read from the KMZ — they're
-        inferred. lossy_fields documents that."""
         kmz = _make_kmz("""
           <Placemark>
             <name>NAI 7</name>
@@ -220,8 +296,6 @@ class TestRecognitionProvenance:
 
 
 class TestBackwardCompatibility:
-    """The recognizer integration preserves attributes['graphic_kind']
-    so Phase 2a CTOs and Phase 2b-2 CTOs share the same vocabulary."""
 
     @pytest.mark.parametrize("label,expected_kind", [
         ("PL ALPHA", "phase_line"),
@@ -243,8 +317,6 @@ class TestBackwardCompatibility:
 
 
 class TestMultiPlacemark:
-    """A KMZ with several placemarks produces one CTO each, each with
-    its own correct recognition output."""
 
     def test_three_different_labels(self):
         kmz = _make_kmz("""
@@ -267,14 +339,11 @@ class TestMultiPlacemark:
         ctos = _parse(kmz)
         assert len(ctos) == 3
 
-        # PL ALPHA: phase line, unknown affiliation
         assert ctos[0].attributes["graphic_kind"] == "phase_line"
         assert ctos[0].symbology.affiliation == Affiliation.UNKNOWN
 
-        # NAI 7 (enemy): NAI, hostile
         assert ctos[1].attributes["graphic_kind"] == "named_area_of_interest"
         assert ctos[1].symbology.affiliation == Affiliation.HOSTILE
 
-        # Chuck's house: fallback, no graphic_kind
         assert "graphic_kind" not in ctos[2].attributes
         assert ctos[2].symbology.affiliation == Affiliation.UNKNOWN
